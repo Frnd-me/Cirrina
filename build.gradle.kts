@@ -47,6 +47,8 @@ dependencies {
   implementation("org.slf4j:slf4j-jdk14:2.0.12")
   implementation("io.dropwizard.metrics:metrics-core:4.2.38")
 
+  implementation("org.neo4j.driver:neo4j-java-driver:5.28.9")
+
   implementation("org.pkl-lang:pkl-config-java:0.30.2")
   implementation("org.pkl-lang:pkl-codegen-java:0.30.2")
 

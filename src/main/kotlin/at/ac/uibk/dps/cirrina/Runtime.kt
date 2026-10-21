@@ -5,6 +5,8 @@ import at.ac.uibk.dps.cirrina.cirrina.di.Run
 import at.ac.uibk.dps.cirrina.execution.`object`.*
 import at.ac.uibk.dps.cirrina.execution.service.RandomServiceImplementationSelector
 import at.ac.uibk.dps.cirrina.execution.service.ServiceImplementation
+import at.ac.uibk.dps.cirrina.execution.trace.TraceRecorder
+import at.ac.uibk.dps.cirrina.execution.trace.TraceRecord
 import at.ac.uibk.dps.cirrina.io.CsmParser
 import at.ac.uibk.dps.cirrina.spec.ContextVariable
 import at.ac.uibk.dps.cirrina.spec.Csml as CsmlSpec
@@ -35,6 +37,7 @@ constructor(
   metricRegistry: MetricRegistry,
   persistentContext: Context?,
   stateMachineFactory: StateMachine.Factory,
+  private val traceRecorder: TraceRecorder,
 ) : PropagationHandler {
   val extent = persistentContext?.let { Extent.of(it) } ?: Extent.of()
 
@@ -91,12 +94,20 @@ constructor(
           eventHandler = eventHandler,
           serviceImplementationSelector = serviceImplementationSelector,
         )
-        .forEach {
-          map.put(it.name, it)
-          eventHandler.addPublishers(it.outputEvents)
+        .forEach { stateMachine ->
+          map.put(stateMachine.name, stateMachine)
+          eventHandler.addPublishers(stateMachine.outputEvents)
           ++version
 
-          it.start(runtimeJob)
+          val createdRecord =
+            TraceRecord.InstanceCreated(
+              instance = stateMachine.name,
+              stateMachine = stateMachine.specification.name,
+            )
+
+          traceRecorder.record(createdRecord)
+
+          stateMachine.start(runtimeJob, causalParent = createdRecord.id)
         }
     }
 
@@ -127,6 +138,7 @@ constructor(
       }
       .also {
         completion.update(it.toJavaDuration())
+        traceRecorder.close()
         logger.info { "runtime terminated in $it" }
       }
   }

@@ -4,6 +4,7 @@ import at.ac.uibk.dps.cirrina.cirrina.di.Identifier
 import at.ac.uibk.dps.cirrina.cirrina.di.Main
 import at.ac.uibk.dps.cirrina.cirrina.di.Run
 import at.ac.uibk.dps.cirrina.execution.`object`.Context
+import at.ac.uibk.dps.cirrina.execution.trace.TraceRecorder
 import com.codahale.metrics.CsvReporter
 import com.codahale.metrics.MetricRegistry
 import dagger.Module
@@ -19,8 +20,11 @@ class TestModule(
   private val context: Context,
   private val mainUri: URI,
   private val run: List<String>,
+  private val traceRecorder: TraceRecorder = TraceRecorder.noop,
 ) {
   @Provides fun provideContext() = context
+
+  @Provides fun provideTraceRecorder() = traceRecorder
 
   @Provides
   @Singleton

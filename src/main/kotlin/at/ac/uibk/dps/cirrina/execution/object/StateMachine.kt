@@ -5,6 +5,8 @@ import at.ac.uibk.dps.cirrina.Runtime
 import at.ac.uibk.dps.cirrina.csm.Csml.EventChannel
 import at.ac.uibk.dps.cirrina.execution.`object`.StateMachine.Factory
 import at.ac.uibk.dps.cirrina.execution.service.ServiceImplementationSelector
+import at.ac.uibk.dps.cirrina.execution.trace.TraceRecorder
+import at.ac.uibk.dps.cirrina.execution.trace.TraceRecord
 import at.ac.uibk.dps.cirrina.spec.Action
 import at.ac.uibk.dps.cirrina.spec.ContextVariable
 import at.ac.uibk.dps.cirrina.spec.Emit
@@ -17,6 +19,7 @@ import com.codahale.metrics.Timer
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedFactory
 import dagger.assisted.AssistedInject
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
 import kotlin.properties.Delegates
 import kotlin.time.Clock
@@ -63,6 +66,7 @@ internal constructor(
   stateFactory: State.Factory,
   transitionFactory: Transition.Factory,
   metricRegistry: MetricRegistry,
+  private val traceRecorder: TraceRecorder,
 ) : Scope {
   override val extent: Extent
 
@@ -116,6 +120,12 @@ internal constructor(
 
   private var activeState: State? = null
 
+  private var causalParent: String? = null
+
+  @Volatile private var currentHandling: TraceRecord.EventHandled? = null
+
+  private val currentEmittedEventIds = ConcurrentLinkedQueue<String>()
+
   private val eventExtent: Extent
 
   private val eventTimer: Timer = metricRegistry.timer("event.latency")
@@ -135,8 +145,10 @@ internal constructor(
     eventExtent = extent.extend(eventContext)
   }
 
-  fun start(parentContext: Job): Job {
+  fun start(parentContext: Job, causalParent: String? = null): Job {
     logger.info { "'$this' entering initial state" }
+
+    this.causalParent = causalParent
 
     val initial = stateInstances[specification.initial.name] ?: error("initial state not found")
     doEnter(initial)?.let { step(it) }
@@ -192,9 +204,35 @@ internal constructor(
         eventTimer.update(deltaNanos, TimeUnit.NANOSECONDS)
       }
 
-      handleEvent(event)?.let { transition -> step(transition) }
+      val handling =
+        TraceRecord.EventHandled(
+          instance = name,
+          stateMachine = specification.name,
+          event = event.topic,
+          eventId = event.id,
+          channel = event.channel.toString(),
+          stateBefore = activeState?.specification?.name,
+          stateAfter = null,
+          emittedEventIds = emptyList(),
+        )
 
-      if (event.channel == EventChannel.INTERNAL) stateMachineEventHandler.propagateToNested(event)
+      currentHandling = handling
+
+      try {
+        handleEvent(event)?.let { transition -> step(transition) }
+
+        if (event.channel == EventChannel.INTERNAL) stateMachineEventHandler.propagateToNested(event)
+      } finally {
+        currentHandling = null
+
+        traceRecorder.record(
+          handling.copy(
+            stateAfter = activeState?.specification?.name,
+            emittedEventIds = currentEmittedEventIds.toList(),
+          )
+        )
+        currentEmittedEventIds.clear()
+      }
     }
 
     processEventTimer.update(delta.toJavaDuration())
@@ -267,6 +305,15 @@ internal constructor(
   private fun doEnter(state: State): ActiveTransition? {
     activeState = state
 
+    traceRecorder.record(
+      TraceRecord.StateEntered(
+        instance = name,
+        stateMachine = specification.name,
+        state = state.specification.name,
+        causalParent = currentHandling?.id ?: causalParent,
+      )
+    )
+
     execute(state.entry, state)
     execute(state.during, state)
 
@@ -333,10 +380,40 @@ internal constructor(
       val now = Clock.System.now()
       val epochNanos = (now.epochSeconds * 1_000_000_000L) + now.nanosecondsOfSecond
 
-      eventHandler.emit(event.copy(source = name, emittedTime = epochNanos))
+      val emitted = event.copy(source = name, emittedTime = epochNanos)
+
+      traceRecorder.record(
+        TraceRecord.EventEmitted(
+          instance = name,
+          stateMachine = specification.name,
+          event = emitted.topic,
+          eventId = emitted.id,
+          channel = emitted.channel.toString(),
+          target = emitted.target,
+          causalParent = currentHandling?.id ?: causalParent,
+        )
+      )
+
+      currentHandling?.let { currentEmittedEventIds.add(emitted.id) }
+
+      eventHandler.emit(emitted)
     }
 
     fun propagateToParent(event: Event) {
+      traceRecorder.record(
+        TraceRecord.EventEmitted(
+          instance = name,
+          stateMachine = specification.name,
+          event = event.topic,
+          eventId = event.id,
+          channel = event.channel.toString(),
+          target = event.target,
+          causalParent = currentHandling?.id ?: causalParent,
+        )
+      )
+
+      currentHandling?.let { currentEmittedEventIds.add(event.id) }
+
       parent?.stateMachineEventHandler?.propagateToParent(event) ?: pushEvent(event)
     }
 
