@@ -5,6 +5,7 @@ import at.ac.uibk.dps.cirrina.cirrina.di.Run
 import at.ac.uibk.dps.cirrina.execution.`object`.*
 import at.ac.uibk.dps.cirrina.execution.service.RandomServiceImplementationSelector
 import at.ac.uibk.dps.cirrina.execution.service.ServiceImplementation
+import at.ac.uibk.dps.cirrina.execution.trace.TraceRecorder
 import at.ac.uibk.dps.cirrina.io.CsmParser
 import at.ac.uibk.dps.cirrina.spec.ContextVariable
 import at.ac.uibk.dps.cirrina.spec.Csml as CsmlSpec
@@ -15,14 +16,18 @@ import com.codahale.metrics.MetricRegistry
 import com.codahale.metrics.Timer
 import jakarta.inject.Inject
 import java.net.URI
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.collections.component1
 import kotlin.collections.component2
 import kotlin.time.measureTime
 import kotlin.time.toJavaDuration
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import mu.KotlinLogging
 
 private val logger = KotlinLogging.logger {}
@@ -35,6 +40,7 @@ constructor(
   metricRegistry: MetricRegistry,
   persistentContext: Context?,
   stateMachineFactory: StateMachine.Factory,
+  private val traceRecorder: TraceRecorder,
 ) : PropagationHandler {
   val extent = persistentContext?.let { Extent.of(it) } ?: Extent.of()
 
@@ -53,6 +59,7 @@ constructor(
   private var completion: Timer = metricRegistry.timer("runtime.completionTime")
 
   inner class InstanceRegistry(private val stateMachineFactory: StateMachine.Factory) {
+    val traceRuntimeId: String = UUID.randomUUID().toString()
     @Volatile
     var version = 0L
       private set
@@ -78,6 +85,7 @@ constructor(
       instance: Instance,
       instanceData: List<ContextVariable> =
         instance.data.map { (k, v) -> ContextVariable(k, v.evaluate()) },
+      causalParent: String? = null,
     ) {
       stateMachineFactory
         .createHierarchy(
@@ -96,7 +104,7 @@ constructor(
           eventHandler.addPublishers(it.outputEvents)
           ++version
 
-          it.start(runtimeJob)
+          it.start(runtimeJob, causalParent = causalParent)
         }
     }
 
@@ -117,18 +125,30 @@ constructor(
   }
 
   fun run() = runBlocking {
-    measureTime {
-        while (runtimeJob.children.any()) {
-          runtimeJob.children.toList().joinAll()
-        }
+    try {
+      measureTime {
+          while (runtimeJob.children.any()) {
+            runtimeJob.children.toList().joinAll()
+          }
 
-        runtimeJob.complete()
-        runtimeJob.join()
+          runtimeJob.complete()
+          runtimeJob.join()
+        }
+        .also {
+          completion.update(it.toJavaDuration())
+          logger.info { "runtime terminated in $it" }
+        }
+    } finally {
+      withContext(NonCancellable) {
+        runtimeJob.cancelAndJoin()
+        instanceRegistry.instances.forEach { it.stop() }
+        try {
+          eventHandler.close()
+        } finally {
+          traceRecorder.close()
+        }
       }
-      .also {
-        completion.update(it.toJavaDuration())
-        logger.info { "runtime terminated in $it" }
-      }
+    }
   }
 
   override fun invoke(event: Event) {

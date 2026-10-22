@@ -5,6 +5,9 @@ import at.ac.uibk.dps.cirrina.Runtime
 import at.ac.uibk.dps.cirrina.csm.Csml.EventChannel
 import at.ac.uibk.dps.cirrina.execution.`object`.StateMachine.Factory
 import at.ac.uibk.dps.cirrina.execution.service.ServiceImplementationSelector
+import at.ac.uibk.dps.cirrina.execution.trace.TraceCause
+import at.ac.uibk.dps.cirrina.execution.trace.TraceRecord
+import at.ac.uibk.dps.cirrina.execution.trace.TraceRecorder
 import at.ac.uibk.dps.cirrina.spec.Action
 import at.ac.uibk.dps.cirrina.spec.ContextVariable
 import at.ac.uibk.dps.cirrina.spec.Emit
@@ -12,6 +15,7 @@ import at.ac.uibk.dps.cirrina.spec.Event
 import at.ac.uibk.dps.cirrina.spec.Reset
 import at.ac.uibk.dps.cirrina.spec.StateMachine as StateMachineSpecification
 import at.ac.uibk.dps.cirrina.spec.Timeout
+import at.ac.uibk.dps.cirrina.util.getInsecureUuid
 import com.codahale.metrics.MetricRegistry
 import com.codahale.metrics.Timer
 import dagger.assisted.Assisted
@@ -63,6 +67,7 @@ internal constructor(
   stateFactory: State.Factory,
   transitionFactory: Transition.Factory,
   metricRegistry: MetricRegistry,
+  private val traceRecorder: TraceRecorder,
 ) : Scope {
   override val extent: Extent
 
@@ -116,6 +121,11 @@ internal constructor(
 
   private var activeState: State? = null
 
+  private val traceInstanceId = getInsecureUuid().toString()
+  private var creationRecordId: String? = null
+  private var lastRecordId: String? = null
+  private var currentCause: TraceCause? = null
+
   private val eventExtent: Extent
 
   private val eventTimer: Timer = metricRegistry.timer("event.latency")
@@ -138,8 +148,26 @@ internal constructor(
   fun start(parentContext: Job): Job {
     logger.info { "'$this' entering initial state" }
 
+    if (traceRecorder.enabled) {
+      val created =
+        TraceRecord.InstanceCreated(
+          instance = name,
+          stateMachine = specification.name,
+          runtimeId = instanceRegistry.traceRuntimeId,
+          causalParent = parent?.creationRecordId,
+        )
+
+      creationRecordId = created.id
+      lastRecordId = created.id
+      currentCause = TraceCause(created.id, specification.initial.name)
+
+      traceRecorder.record(created)
+    }
+
     val initial = stateInstances[specification.initial.name] ?: error("initial state not found")
     doEnter(initial)?.let { step(it) }
+
+    currentCause = null
 
     started.complete(Unit)
 
@@ -159,6 +187,12 @@ internal constructor(
       eventChannel.close()
       coroutineScope.cancel()
     }
+  }
+
+  suspend fun stop() {
+    timeoutActionManager.shutdown()
+    eventChannel.cancel()
+    coroutineScope.coroutineContext.job.cancelAndJoin()
   }
 
   fun pushEvent(event: Event) {
@@ -192,9 +226,53 @@ internal constructor(
         eventTimer.update(deltaNanos, TimeUnit.NANOSECONDS)
       }
 
-      handleEvent(event)?.let { transition -> step(transition) }
+      val handling =
+        if (traceRecorder.enabled)
+          TraceRecord.EventHandled(
+            instance = name,
+            stateMachine = specification.name,
+            runtimeId = instanceRegistry.traceRuntimeId,
+            event = event.topic,
+            eventId = event.id,
+            channel = event.channel.toString(),
+            source = event.source,
+            target = event.target,
+            stateBefore = activeState?.specification?.name,
+            stateAfter = null,
+            emittedEventIds = emptyList(),
+            previousRecord = lastRecordId,
+          )
+        else null
 
-      if (event.channel == EventChannel.INTERNAL) stateMachineEventHandler.propagateToNested(event)
+      val cause = handling?.let { TraceCause(it.id, it.stateBefore, collectEmissions = true) }
+      currentCause = cause
+
+      if (handling != null) lastRecordId = handling.id
+
+      var failure: String? = null
+      try {
+        handleEvent(event)?.let { transition -> step(transition) }
+
+        if (event.channel == EventChannel.INTERNAL) {
+          stateMachineEventHandler.propagateToNested(event)
+        }
+      } catch (exception: Exception) {
+        failure = exception.toString()
+
+        throw exception
+      } finally {
+        currentCause = null
+
+        if (handling != null) {
+          traceRecorder.record(
+            handling.copy(
+              stateAfter = activeState?.specification?.name,
+              emittedEventIds = cause!!.emittedEventIds(),
+              error = failure,
+            )
+          )
+        }
+      }
     }
 
     processEventTimer.update(delta.toJavaDuration())
@@ -267,6 +345,22 @@ internal constructor(
   private fun doEnter(state: State): ActiveTransition? {
     activeState = state
 
+    if (traceRecorder.enabled) {
+      val entered =
+        TraceRecord.StateEntered(
+          instance = name,
+          stateMachine = specification.name,
+          state = state.specification.name,
+          runtimeId = instanceRegistry.traceRuntimeId,
+          causalParent = currentCause?.id,
+          previousRecord = lastRecordId,
+        )
+
+      lastRecordId = entered.id
+      traceRecorder.record(entered)
+      currentCause = currentCause?.inState(state.specification.name)
+    }
+
     execute(state.entry, state)
     execute(state.during, state)
 
@@ -290,7 +384,11 @@ internal constructor(
     }
   }
 
-  private tailrec fun execute(actions: List<Action>, scope: Scope) {
+  private tailrec fun execute(
+    actions: List<Action>,
+    scope: Scope,
+    cause: TraceCause? = currentCause,
+  ) {
     if (actions.isEmpty()) return
 
     val nextActions = mutableListOf<Action>()
@@ -302,13 +400,13 @@ internal constructor(
         stopTimeout(action.action)
       }
 
-      val result = actionExecutor.execute(action, scope)
+      val result = actionExecutor.execute(action, scope, cause)
       if (result.isNotEmpty()) {
         nextActions.addAll(result)
       }
     }
 
-    execute(nextActions, scope)
+    execute(nextActions, scope, cause)
   }
 
   private fun startTimeout(timeout: Timeout) {
@@ -316,11 +414,15 @@ internal constructor(
       timeout.delay.evaluate(extent) as? Number
         ?: error("timeout delay '${timeout.delay}' is non-numeric")
 
+    // Timer callbacks must not inherit whichever event happens to be processing when they fire.
+    val cause =
+      if (traceRecorder.enabled) TraceCause(lastRecordId!!, activeState?.specification?.name)
+      else null
     timeoutActionManager.start(timeout.name, delay) {
       val action = timeout.triggers
       if (action !is Emit) error("timeout action '$action' must be an emit action")
 
-      execute(listOf(action), this)
+      execute(listOf(action), this, cause)
     }
   }
 
@@ -329,15 +431,45 @@ internal constructor(
   override fun toString() = "StateMachine(name='$name')"
 
   inner class StateMachineEventHandler(val eventHandler: EventHandler) {
-    fun emit(event: Event) {
-      val now = Clock.System.now()
-      val epochNanos = (now.epochSeconds * 1_000_000_000L) + now.nanosecondsOfSecond
-
-      eventHandler.emit(event.copy(source = name, emittedTime = epochNanos))
+    fun emit(event: Event, cause: TraceCause? = null) {
+      eventHandler.emit(prepareEmission(event, cause))
     }
 
-    fun propagateToParent(event: Event) {
-      parent?.stateMachineEventHandler?.propagateToParent(event) ?: pushEvent(event)
+    fun propagateToParent(event: Event, cause: TraceCause? = null) {
+      deliverToParent(prepareEmission(event, cause))
+    }
+
+    private fun prepareEmission(event: Event, cause: TraceCause?): Event {
+      val now = Clock.System.now()
+      val emitted =
+        event.copy(
+          id = getInsecureUuid().toString(),
+          source = name,
+          emittedTime = now.epochSeconds * 1_000_000_000L + now.nanosecondsOfSecond,
+        )
+
+      if (traceRecorder.enabled) {
+        traceRecorder.record(
+          TraceRecord.EventEmitted(
+            instance = name,
+            stateMachine = specification.name,
+            runtimeId = instanceRegistry.traceRuntimeId,
+            event = emitted.topic,
+            eventId = emitted.id,
+            channel = emitted.channel.toString(),
+            target = emitted.target,
+            state = cause?.state,
+            causalParent = cause?.id,
+          )
+        )
+        cause?.emitted(emitted.id)
+      }
+
+      return emitted
+    }
+
+    private fun deliverToParent(event: Event) {
+      parent?.stateMachineEventHandler?.deliverToParent(event) ?: pushEvent(event)
     }
 
     fun propagateToNested(event: Event) {

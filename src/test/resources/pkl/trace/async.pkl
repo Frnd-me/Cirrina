@@ -1,0 +1,30 @@
+amends "modulepath:/pkl/csm/csml.pkl"
+collaborativeStateMachine {
+  stateMachines {
+    ["async"] = new StateMachine {
+      states {
+        ["waiting"] = new Initial {
+          on { ["begin"] = new Transition { to = "working" } }
+        }
+        ["working"] = new State {
+          entry {
+            new Invoke {
+              type = "increment"; mode = "local"
+              input { ["v"] = "0" }
+              emits { new ConditionalEvent { event = new Internal { topic = "completed" } } }
+            }
+          }
+          on { ["completed"] = new Transition { to = "done" } }
+        }
+        ["done"] = new Terminal {}
+      }
+    }
+  }
+}
+instances { ["async"] = new Instance { stateMachineName = "async" } }
+bindings {
+  new HttpServiceImplementationBinding {
+    name = "increment"; `local` = true; scheme = "http"; host = "localhost"
+    port = 8000; endPoint = "/increment"; method = "GET"
+  }
+}

@@ -1,0 +1,38 @@
+amends "modulepath:/pkl/csm/csml.pkl"
+collaborativeStateMachine {
+  stateMachines {
+    ["sender"] = new StateMachine {
+      transient { ["acks"] = "0" }
+      states {
+        ["waiting"] = new Initial {
+          on { ["begin"] = new Transition { to = "working" } }
+        }
+        ["working"] = new State {
+          entry { new Emit { event { topic = "work" } } }
+          on {
+            ["ack"] = new Transition { yields { new Eval { expression = "++acks" } } }
+            ["check"] = new Transition { to = "done"; provided = "acks == 2" }
+          }
+          after {
+            ["check"] = new Timeout {
+              delay = "20"
+              triggers = new Emit { event = new Internal { topic = "check" } }
+            }
+          }
+        }
+        ["done"] = new Terminal {}
+      }
+    }
+    ["worker"] = new StateMachine {
+      states {
+        ["waiting"] = new Initial { on { ["work"] = new Transition { to = "done" } } }
+        ["done"] = new Terminal { entry { new Emit { event { topic = "ack" } } } }
+      }
+    }
+  }
+}
+instances {
+  ["sender"] = new Instance { stateMachineName = "sender"; subscription = Regex("worker.*") }
+  ["workerA"] = new Instance { stateMachineName = "worker"; subscription = Regex("sender") }
+  ["workerB"] = new Instance { stateMachineName = "worker"; subscription = Regex("sender") }
+}
