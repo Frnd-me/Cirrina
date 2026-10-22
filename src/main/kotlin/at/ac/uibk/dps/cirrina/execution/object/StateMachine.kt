@@ -145,16 +145,17 @@ internal constructor(
     eventExtent = extent.extend(eventContext)
   }
 
-  fun start(parentContext: Job): Job {
+  fun start(parentContext: Job, causalParent: String? = null): Job {
     logger.info { "'$this' entering initial state" }
 
     if (traceRecorder.enabled) {
       val created =
         TraceRecord.InstanceCreated(
           instance = name,
+          instanceId = traceInstanceId,
           stateMachine = specification.name,
           runtimeId = instanceRegistry.traceRuntimeId,
-          causalParent = parent?.creationRecordId,
+          causalParent = parent?.creationRecordId ?: causalParent,
         )
 
       creationRecordId = created.id
@@ -230,6 +231,7 @@ internal constructor(
         if (traceRecorder.enabled)
           TraceRecord.EventHandled(
             instance = name,
+            instanceId = traceInstanceId,
             stateMachine = specification.name,
             runtimeId = instanceRegistry.traceRuntimeId,
             event = event.topic,
@@ -349,6 +351,7 @@ internal constructor(
       val entered =
         TraceRecord.StateEntered(
           instance = name,
+          instanceId = traceInstanceId,
           stateMachine = specification.name,
           state = state.specification.name,
           runtimeId = instanceRegistry.traceRuntimeId,
@@ -452,6 +455,7 @@ internal constructor(
         traceRecorder.record(
           TraceRecord.EventEmitted(
             instance = name,
+            instanceId = traceInstanceId,
             stateMachine = specification.name,
             runtimeId = instanceRegistry.traceRuntimeId,
             event = emitted.topic,

@@ -38,39 +38,79 @@ internal fun tracedRuntime(uri: URI, instances: List<String>, recorder: TraceRec
 
 internal fun awaitTrace(predicate: () -> Boolean) {
   val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+
   while (!predicate() && System.nanoTime() < deadline) Thread.sleep(5)
+
   assertTrue(predicate(), "timed out waiting for trace")
 }
 
 @Timeout(20)
 class TraceTest {
   @Test
+  fun `reusing an instance name keeps separate trace lifetimes`() {
+    val recordings =
+      List(2) {
+        val recorder = CollectingTraceRecorder()
+        val runtime =
+          tracedRuntime(TestUtils.resourceUri("pkl/trace/loop.pkl"), listOf("loop"), recorder)
+
+        awaitTrace { recorder.records.filterIsInstance<TraceRecord.EventHandled>().count() == 4 }
+
+        runtime(Event("resume", EventChannel.PERIPHERAL))
+        runtime.run()
+
+        recorder.records.toList()
+      }
+
+    val creations = recordings.map { it.filterIsInstance<TraceRecord.InstanceCreated>().single() }
+
+    assertEquals(listOf("loop", "loop"), creations.map { it.instance })
+    assertEquals(2, creations.map { it.instanceId }.toSet().size)
+    assertEquals(2, creations.map { it.runtimeId }.toSet().size)
+
+    recordings.zip(creations).forEach { (records, created) ->
+      assertNotEquals(created.instance, created.instanceId)
+      assertEquals(setOf(created.instanceId), records.map { it.instanceId }.toSet())
+    }
+  }
+
+  @Test
   fun `loops keep unique emissions and continue after an external event`() {
     val recorder = CollectingTraceRecorder()
     val runtime =
       tracedRuntime(TestUtils.resourceUri("pkl/trace/loop.pkl"), listOf("loop"), recorder)
+
     awaitTrace { recorder.records.filterIsInstance<TraceRecord.EventHandled>().count() == 4 }
+
     val resume = Event("resume", EventChannel.PERIPHERAL, source = "sensor")
+
     runtime(resume)
     runtime.run()
 
     val records = recorder.records.toList()
     val emitted = records.filterIsInstance<TraceRecord.EventEmitted>()
+
     assertEquals(4, emitted.size)
     assertEquals(4, emitted.map { it.eventId }.toSet().size)
+
     val handled = records.filterIsInstance<TraceRecord.EventHandled>()
+
     assertEquals(5, handled.size)
     assertEquals(
       emitted.map { it.eventId }.toSet(),
       handled.filter { it.event == "tick" }.map { it.eventId }.toSet(),
     )
+
     val external = handled.single { it.event == "resume" }
+
     assertEquals("waiting", external.stateBefore)
     assertEquals("done", external.stateAfter)
     assertEquals(resume.id, external.eventId)
     assertNotNull(external.previousRecord)
     assertNull(external.causalParent)
+
     val byId = records.associateBy { it.id }
+
     assertEquals(records.size, byId.size)
     records.forEach { record ->
       record.causalParent?.let { assertTrue(it in byId) }
@@ -92,31 +132,40 @@ class TraceTest {
     val recorder = CollectingTraceRecorder()
     val entered = CountDownLatch(1)
     val release = CountDownLatch(1)
+
     val server =
       TestUtils.mockHttpServer { input ->
         entered.countDown()
         check(release.await(5, TimeUnit.SECONDS))
         input
       }
+
     try {
       val runtime =
         tracedRuntime(TestUtils.resourceUri("pkl/trace/async.pkl"), listOf("async"), recorder)
+
       runtime(Event("begin", EventChannel.PERIPHERAL))
+
       assertTrue(entered.await(5, TimeUnit.SECONDS))
+
       runtime(Event("unrelated", EventChannel.PERIPHERAL))
+
       awaitTrace {
         recorder.records.filterIsInstance<TraceRecord.EventHandled>().any {
           it.event == "unrelated"
         }
       }
+
       release.countDown()
       runtime.run()
+
       val begin =
         recorder.records.filterIsInstance<TraceRecord.EventHandled>().single { it.event == "begin" }
       val completion = recorder.records.filterIsInstance<TraceRecord.EventEmitted>().single()
+
       assertEquals(begin.id, completion.causalParent)
       assertEquals("working", completion.state)
-      assertTrue(begin.emittedEventIds.isEmpty()) // completion happens after the handler returns
+      assertTrue(begin.emittedEventIds.isEmpty())
     } finally {
       release.countDown()
       server.stop(0)
@@ -131,6 +180,7 @@ class TraceTest {
     val records = recorder.records.associateBy { it.id }
     val created = recorder.records.filterIsInstance<TraceRecord.InstanceCreated>()
     val dynamic = created.filter { it.stateMachine == "instantiated" }
+
     assertEquals(10, dynamic.size)
     assertEquals(created.size, created.map { it.instanceId }.toSet().size)
     dynamic.forEach {
@@ -150,13 +200,18 @@ class TraceTest {
       TestUtils.mockHttpServer { input ->
         input.map { at.ac.uibk.dps.cirrina.spec.ContextVariable(it.name, (it.value as Int) + 1) }
       }
+
     try {
       tracedRuntime(DefaultDescriptions.complete, listOf("complete"), recorder).run()
+
       val nested =
         recorder.records.filterIsInstance<TraceRecord.EventEmitted>().filter { it.event == "ne1" }
+
       assertEquals(1, nested.size)
       assertEquals("complete@nestedStateMachine", nested.single().instance)
+
       val created = recorder.records.filterIsInstance<TraceRecord.InstanceCreated>()
+
       assertEquals(
         created.single { it.instance == "complete" }.id,
         created.single { it.instance.contains('@') }.causalParent,

@@ -28,7 +28,6 @@ object EnvironmentVariables {
   val metricsPeriod = EnvironmentVariable("METRICS_PERIOD", 1L)
 
   val traceRecorder = EnvironmentVariable<String?>("TRACE_RECORDER", null)
-  val traceSpoolDirectory = EnvironmentVariable("TRACE_SPOOL_DIRECTORY", "trace-spool")
 
   val neo4jUri = EnvironmentVariable("NEO4J_URI", "bolt://localhost:7687")
   val neo4jDatabase = EnvironmentVariable("NEO4J_DATABASE", "neo4j")

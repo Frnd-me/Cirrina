@@ -83,8 +83,10 @@ def build_graph(records: Iterable[Mapping[str, Any]]) -> nx.MultiDiGraph:
 
     for record in records:
         target = record["id"]
+
         for field, kind in (("causalParent", "cause"), ("previousRecord", "order")):
             source = record.get(field)
+
             if source:
                 add_boundary(graph, source)
                 graph.add_edge(source, target, key=kind, kind=kind)
@@ -98,11 +100,13 @@ def build_graph(records: Iterable[Mapping[str, Any]]) -> nx.MultiDiGraph:
             "topic": record.get("event", ""),
             "channel": record.get("channel", ""),
         }
+
         senders = emissions.get(event_id, [])
         if not senders:
             source = f"event:{event_id}"
             add_boundary(graph, source, **event)
             senders = [source]
+
         for source in senders:
             graph.add_edge(
                 source, target, key=f"event:{event_id}", kind="event", **event
@@ -119,6 +123,7 @@ def load_trace_graph(
 ) -> nx.MultiDiGraph:
     if limit < 1:
         raise ValueError("limit must be positive")
+
     if runtimes is None:
         runtimes = latest_execution(driver, database)
 
@@ -263,6 +268,7 @@ def main(argv: list[str] | None = None) -> int:
         export_graph(graph, args.output)
     except (Neo4jError, DriverError, OSError, ValueError) as error:
         print(f"Cannot export trace: {error}", file=sys.stderr)
+
         return 1
 
     print(

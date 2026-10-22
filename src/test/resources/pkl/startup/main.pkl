@@ -1,0 +1,37 @@
+amends "modulepath:/pkl/csm/csml.pkl"
+
+collaborativeStateMachine {
+  stateMachines {
+    ["sender"] {
+      states {
+        ["waiting"] = new Initial {
+          entry {
+            new Emit { event { topic = "request" }; target = "'startupReceiver'" }
+          }
+          on { ["reply"] { to = "done" } }
+        }
+        ["done"] = new Terminal {}
+      }
+    }
+    ["receiver"] {
+      states {
+        ["waiting"] = new Initial {
+          on {
+            ["request"] {
+              to = "done"
+              yields {
+                new Emit { event { topic = "reply" }; target = "'startupSender'" }
+              }
+            }
+          }
+        }
+        ["done"] = new Terminal {}
+      }
+    }
+  }
+}
+
+instances {
+  ["startupSender"] { stateMachineName = "sender" }
+  ["startupReceiver"] { stateMachineName = "receiver" }
+}

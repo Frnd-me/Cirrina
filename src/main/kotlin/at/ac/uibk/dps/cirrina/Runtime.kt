@@ -87,6 +87,19 @@ constructor(
         instance.data.map { (k, v) -> ContextVariable(k, v.evaluate()) },
       causalParent: String? = null,
     ) {
+      register(instance, instanceData).forEach { it.start(runtimeJob, causalParent = causalParent) }
+    }
+
+    fun instantiateAll(instances: List<Instance>) {
+      val registered = instances.flatMap { register(it) }
+      registered.forEach { it.start(runtimeJob) }
+    }
+
+    private fun register(
+      instance: Instance,
+      instanceData: List<ContextVariable> =
+        instance.data.map { (k, v) -> ContextVariable(k, v.evaluate()) },
+    ): List<StateMachine> =
       stateMachineFactory
         .createHierarchy(
           name = instance.name,
@@ -99,14 +112,11 @@ constructor(
           eventHandler = eventHandler,
           serviceImplementationSelector = serviceImplementationSelector,
         )
-        .forEach {
+        .onEach {
           map.put(it.name, it)
           eventHandler.addPublishers(it.outputEvents)
           ++version
-
-          it.start(runtimeJob, causalParent = causalParent)
         }
-    }
 
     fun findStateMachineInstance(name: String): StateMachine? = map.get(name)
   }
@@ -121,7 +131,8 @@ constructor(
       }
     }
 
-    csml.instances.filter { it.name in run }.forEach { instanceRegistry.instantiate(it) }
+    val instancesByName = csml.instances.associateBy { it.name }
+    instanceRegistry.instantiateAll(run.distinct().mapNotNull { instancesByName[it] })
   }
 
   fun run() = runBlocking {
