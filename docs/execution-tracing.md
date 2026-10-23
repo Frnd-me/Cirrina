@@ -24,10 +24,16 @@ Export the latest execution and draw its event sequence:
 ```sh
 poetry install --no-root
 poetry run python scripts/trace_exporter.py --output trace.graphml
-poetry run python scripts/trace_visualizer.py trace.graphml --output trace.svg
+poetry run python scripts/trace_lamport.py trace.graphml --output trace.lamport.svg
+poetry run python scripts/trace_graph.py trace.graphml --output trace.graph.svg
+poetry run python scripts/trace_timeline.py trace.graphml --output trace.timeline.html
 # or
 poetry run python scripts/trace_exporter.py --output trace.dot
 ```
+
+The graph view requires Graphviz (`dot` on PATH). Open the SVG in a browser to zoom in.
+Open `trace.timeline.html` in a browser and select X and Y to measure their recorded time difference
+in milliseconds. Cross-machine comparisons assume synchronized clocks.
 
 Choose another execution or export more records:
 

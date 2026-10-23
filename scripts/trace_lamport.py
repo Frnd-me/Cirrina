@@ -1,3 +1,5 @@
+"""Render a GraphML execution trace as a Lamport-style event diagram."""
+
 import argparse
 import sys
 from collections.abc import Mapping
@@ -235,7 +237,7 @@ def main(argv: list[str] | None = None) -> int:
             figure.savefig(output, dpi=150, bbox_inches="tight")
     except (OSError, ValueError, ParseError, nx.NetworkXException) as error:
         print(f"Cannot visualize trace: {error}", file=sys.stderr)
-        
+
         return 1
 
     print(f"Rendered trace to {output.resolve()}")
