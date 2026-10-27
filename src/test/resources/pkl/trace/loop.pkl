@@ -1,0 +1,22 @@
+amends "modulepath:/pkl/csm/csml.pkl"
+collaborativeStateMachine {
+  stateMachines {
+    ["loop"] = new StateMachine {
+      transient { ["i"] = "0" }
+      states {
+        ["a"] = new Initial {
+          entry {
+            new Eval { expression = "++i" }
+            new Emit { event = new Internal { topic = "tick" } }
+          }
+          on { ["tick"] = new Transition { to = "a"; provided = "i < 4"; or = "waiting" } }
+        }
+        ["waiting"] = new State {
+          on { ["resume"] = new Transition { to = "done" } }
+        }
+        ["done"] = new Terminal {}
+      }
+    }
+  }
+}
+instances { ["loop"] = new Instance { stateMachineName = "loop" } }

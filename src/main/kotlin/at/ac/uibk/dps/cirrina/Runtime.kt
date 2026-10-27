@@ -5,6 +5,7 @@ import at.ac.uibk.dps.cirrina.cirrina.di.Run
 import at.ac.uibk.dps.cirrina.execution.`object`.*
 import at.ac.uibk.dps.cirrina.execution.service.RandomServiceImplementationSelector
 import at.ac.uibk.dps.cirrina.execution.service.ServiceImplementation
+import at.ac.uibk.dps.cirrina.execution.trace.CausalTraceRecorder
 import at.ac.uibk.dps.cirrina.io.CsmParser
 import at.ac.uibk.dps.cirrina.spec.ContextVariable
 import at.ac.uibk.dps.cirrina.spec.Csml as CsmlSpec
@@ -15,14 +16,18 @@ import com.codahale.metrics.MetricRegistry
 import com.codahale.metrics.Timer
 import jakarta.inject.Inject
 import java.net.URI
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.collections.component1
 import kotlin.collections.component2
 import kotlin.time.measureTime
 import kotlin.time.toJavaDuration
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import mu.KotlinLogging
 
 private val logger = KotlinLogging.logger {}
@@ -35,6 +40,7 @@ constructor(
   metricRegistry: MetricRegistry,
   persistentContext: Context?,
   stateMachineFactory: StateMachine.Factory,
+  private val causalTraceRecorder: CausalTraceRecorder,
 ) : PropagationHandler {
   val extent = persistentContext?.let { Extent.of(it) } ?: Extent.of()
 
@@ -53,6 +59,7 @@ constructor(
   private var completion: Timer = metricRegistry.timer("runtime.completionTime")
 
   inner class InstanceRegistry(private val stateMachineFactory: StateMachine.Factory) {
+    val traceRuntimeId: String = UUID.randomUUID().toString()
     @Volatile
     var version = 0L
       private set
@@ -78,7 +85,21 @@ constructor(
       instance: Instance,
       instanceData: List<ContextVariable> =
         instance.data.map { (k, v) -> ContextVariable(k, v.evaluate()) },
+      causalParent: String? = null,
     ) {
+      register(instance, instanceData).forEach { it.start(runtimeJob, causalParent = causalParent) }
+    }
+
+    fun instantiateAll(instances: List<Instance>) {
+      val registered = instances.flatMap { register(it) }
+      registered.forEach { it.start(runtimeJob) }
+    }
+
+    private fun register(
+      instance: Instance,
+      instanceData: List<ContextVariable> =
+        instance.data.map { (k, v) -> ContextVariable(k, v.evaluate()) },
+    ): List<StateMachine> =
       stateMachineFactory
         .createHierarchy(
           name = instance.name,
@@ -91,14 +112,11 @@ constructor(
           eventHandler = eventHandler,
           serviceImplementationSelector = serviceImplementationSelector,
         )
-        .forEach {
+        .onEach {
           map.put(it.name, it)
           eventHandler.addPublishers(it.outputEvents)
           ++version
-
-          it.start(runtimeJob)
         }
-    }
 
     fun findStateMachineInstance(name: String): StateMachine? = map.get(name)
   }
@@ -113,22 +131,35 @@ constructor(
       }
     }
 
-    csml.instances.filter { it.name in run }.forEach { instanceRegistry.instantiate(it) }
+    val instancesByName = csml.instances.associateBy { it.name }
+    instanceRegistry.instantiateAll(run.distinct().mapNotNull { instancesByName[it] })
   }
 
   fun run() = runBlocking {
-    measureTime {
-        while (runtimeJob.children.any()) {
-          runtimeJob.children.toList().joinAll()
-        }
+    try {
+      measureTime {
+          while (runtimeJob.children.any()) {
+            runtimeJob.children.toList().joinAll()
+          }
 
-        runtimeJob.complete()
-        runtimeJob.join()
+          runtimeJob.complete()
+          runtimeJob.join()
+        }
+        .also {
+          completion.update(it.toJavaDuration())
+          logger.info { "runtime terminated in $it" }
+        }
+    } finally {
+      withContext(NonCancellable) {
+        runtimeJob.cancelAndJoin()
+        instanceRegistry.instances.forEach { it.stop() }
+        try {
+          eventHandler.close()
+        } finally {
+          causalTraceRecorder.close()
+        }
       }
-      .also {
-        completion.update(it.toJavaDuration())
-        logger.info { "runtime terminated in $it" }
-      }
+    }
   }
 
   override fun invoke(event: Event) {

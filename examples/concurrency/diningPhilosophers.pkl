@@ -64,6 +64,9 @@ collaborativeStateMachine {
       }
     }
     ["philosopher"] {
+      transient {
+        ["meals"] = "0"
+      }
       states {
         ["hungry"] = new Initial {
           entry {
@@ -74,7 +77,6 @@ collaborativeStateMachine {
           }
         }
         ["eating"] {
-          static { ["meals"] = "0" }
           after {
             ["eating"] = new Timeout {
               delay = "std:randomAround(10,2)"
@@ -105,9 +107,12 @@ collaborativeStateMachine {
           on {
             ["thought"] {
               to = "hungry"
+              provided = "meals < 5"
+              or = "sated"
             }
           }
         }
+        ["sated"] = new Terminal {}
       }
     }
   }

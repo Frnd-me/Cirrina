@@ -3,6 +3,7 @@ package at.ac.uibk.dps.cirrina.execution.`object`
 import at.ac.uibk.dps.cirrina.Runtime
 import at.ac.uibk.dps.cirrina.csm.Csml.EventChannel
 import at.ac.uibk.dps.cirrina.execution.service.ServiceImplementationSelector
+import at.ac.uibk.dps.cirrina.execution.trace.CausalTrace
 import at.ac.uibk.dps.cirrina.spec.Action
 import at.ac.uibk.dps.cirrina.spec.ContextVariable
 import at.ac.uibk.dps.cirrina.spec.Ctr
@@ -38,21 +39,25 @@ class ActionExecutor(
   private val eventHandler: StateMachine.StateMachineEventHandler,
   private val coroutineScope: CoroutineScope,
 ) {
-  fun execute(specification: Action, scope: Scope): List<Action> =
+  fun execute(specification: Action, scope: Scope, cause: CausalTrace? = null): List<Action> =
     when (specification) {
-      is Invoke -> executeInvoke(specification, scope)
+      is Invoke -> executeInvoke(specification, scope, cause)
       is Eval -> executeEval(specification, scope)
-      is Emit -> executeEmit(specification, scope)
+      is Emit -> executeEmit(specification, scope, cause)
       is Timeout -> listOf(specification.triggers)
       is Reset -> emptyList()
       is Match -> executeMatch(specification, scope)
       is Log -> executeLog(specification, scope)
-      is Instantiate -> executeInstantiate(specification, scope)
+      is Instantiate -> executeInstantiate(specification, scope, cause)
       is Ctr -> executeCtr(specification, scope)
       else -> error("unknown action type '${specification::class.simpleName}'")
     }
 
-  private fun executeInvoke(specification: Invoke, scope: Scope): List<Action> {
+  private fun executeInvoke(
+    specification: Invoke,
+    scope: Scope,
+    cause: CausalTrace?,
+  ): List<Action> {
     val service =
       selector.select(specification.type, specification.mode)
         ?: error("no service implementation found for type '${specification.type}'")
@@ -85,9 +90,9 @@ class ActionExecutor(
               if (shouldEmit != false) {
                 val emittedEvent = conditionalEvent.event.copy(data = output)
                 if (emittedEvent.channel == EventChannel.INTERNAL) {
-                  eventHandler.propagateToParent(emittedEvent)
+                  eventHandler.propagateToParent(emittedEvent, cause)
                 } else {
-                  eventHandler.emit(emittedEvent)
+                  eventHandler.emit(emittedEvent, cause)
                 }
               }
             }
@@ -105,7 +110,7 @@ class ActionExecutor(
     return emptyList()
   }
 
-  private fun executeEmit(specification: Emit, scope: Scope): List<Action> {
+  private fun executeEmit(specification: Emit, scope: Scope, cause: CausalTrace?): List<Action> {
     val emittedEvent =
       specification.event.run {
         val evaluatedData =
@@ -122,8 +127,8 @@ class ActionExecutor(
       }
 
     with(eventHandler) {
-      if (emittedEvent.channel == EventChannel.INTERNAL) propagateToParent(emittedEvent)
-      else emit(emittedEvent)
+      if (emittedEvent.channel == EventChannel.INTERNAL) propagateToParent(emittedEvent, cause)
+      else emit(emittedEvent, cause)
     }
 
     return emptyList()
@@ -140,13 +145,17 @@ class ActionExecutor(
     return emptyList()
   }
 
-  private fun executeInstantiate(specification: Instantiate, scope: Scope): List<Action> {
+  private fun executeInstantiate(
+    specification: Instantiate,
+    scope: Scope,
+    cause: CausalTrace?,
+  ): List<Action> {
     val instances = specification.instances.map { it.evaluate(scope.extent).getOrThrow() }
 
     instances.forEach {
       val instanceData = it.data.map { (k, v) -> ContextVariable(k, v.evaluate(scope.extent)) }
 
-      scope.instanceRegistry.instantiate(it, instanceData)
+      scope.instanceRegistry.instantiate(it, instanceData, causalParent = cause?.id)
     }
 
     return emptyList()
